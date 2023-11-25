@@ -1,0 +1,287 @@
+---
+title: "ST443 Project"
+output: pdf_document
+date: "2023-11-06"
+---
+
+## Part 1.2
+
+```{r data}
+
+set.seed(8)
+
+library(mvtnorm)
+
+n <- 20
+
+n_test <- 200
+
+p <- 8 #number of predictors (dim of beta)
+
+sets <- 50
+
+betas <- c(3,1.5,0,0,2,0,0,0)
+
+sigma <- 1
+
+lam <- 1.9
+
+mu_x <- 0
+
+
+calculate_correlation_between_elem <- function(i, j) {
+  return(0.5^abs(j - i))
+}
+
+cov_matrix <- matrix(NA, ncol = p, nrow = p)
+
+for (i in 1:p) {
+  for (j in 1:p) {
+    cov_matrix[i, j] <- calculate_correlation_between_elem(i, j)
+  }
+}
+
+y_data <- list()
+x_data <- list()
+y_val_data <- list()
+x_val_data <- list()
+
+
+for (i in 1:sets) {
+  
+  temp_x <- rmvnorm(n, mean = rep(mu_x,p), sigma = cov_matrix)
+  
+  temp_y <- temp_x %*% betas + sigma*rnorm(n)
+  
+  x_data <- append(x_data, list(temp_x))
+  y_data <- append(y_data, list(temp_y))
+  
+}
+
+for (i in 1:sets) {
+  
+  temp_x <- rmvnorm(n, mean = rep(mu_x,p), sigma = cov_matrix)
+  
+  temp_y <- temp_x %*% betas + sigma*rnorm(n)
+
+  x_val_data <- append(x_val_data, list(temp_x))
+  y_val_data <- append(y_val_data, list(temp_y))
+
+}
+
+
+test_x <- rmvnorm(n_test, mean = rep(mu_x,p), sigma = cov_matrix)
+
+test_y <- test_x %*% betas + sigma*rnorm(n_test)
+
+```
+
+
+
+```{r}
+
+# One-at-a-Time Coordinate Descent for Lasso in R
+
+# Function to perform lasso using coordinate descent
+lasso_coord_desc <- function(X, y, lambda, tolerance = 1e-4, max_iterations = 10000) {
+  # Initialize coefficients
+  n <- nrow(X)
+  p <- ncol(X)
+  beta <- rep(0, p)
+  r <- y - X %*% beta # initial residual
+
+  # Iterative coordinate descent
+  for(iter in 1:max_iterations) {
+    beta_old <- beta # store old beta for convergence check
+
+    # Loop over each predictor
+    for(j in 1:p) {
+      # Calculate partial residual excluding current predictor
+      r_partial <- y - X[, -j] %*% beta[-j]
+
+      # Compute rho (correlation)
+      rho <- sum(X[,j] * r_partial)
+
+      # Update beta[j] using soft thresholding
+      if(rho < -lambda) {
+        beta[j] <- (rho + lambda) / sum(X[,j]^2)
+      } else if(rho > lambda) {
+        beta[j] <- (rho - lambda) / sum(X[,j]^2)
+      } else {
+        beta[j] <- 0
+      }
+
+      # Update residual (for the next iteration)
+      r <- y - X %*% beta
+    }
+
+    # Check for convergence
+    if(max(abs(beta - beta_old)) < tolerance) {
+      break
+    }
+  }
+
+  return(beta)
+}
+
+beta_ests_data <- list()
+
+for (set in 1:sets) {
+  
+  beta_ests <- lasso_coord_desc(x_data[[set]], y_data[[set]], lam, tolerance = 1e-4, max_iterations = 1000) 
+  
+  beta_ests_data <- append(beta_ests_data, list(beta_ests))
+}
+
+
+```
+
+
+
+
+```{r y estimation}
+
+y_hat_data <- list()
+
+for (i in 1:sets) {
+  
+  temp_y_hat <- x_data[[i]] %*% beta_ests_data[[i]]
+  
+  y_hat_data <- append(y_hat_data, list(temp_y_hat))
+}
+
+```
+
+
+```{r MSE}
+
+mse <- c()
+
+for (i in 1:sets) {
+  
+  temp_mse <- sum((y_data[[i]] - y_hat_data[[i]])^2)
+  
+  mse <- c(mse, temp_mse)
+}
+
+mean_mse <- mean(mse)
+
+```
+
+
+```{r cross validation lambda}
+
+mse_cv <- c()
+
+
+for (lam_cv in seq(from = 5*10^-2, to = 5*10^0, by = 5*10^-2)) {
+  
+  beta_ests_data <- list()
+
+  for (set in 1:sets) {
+    
+    beta_ests <- 
+      lasso_coord_desc(x_val_data[[set]], y_val_data[[set]], lam_cv, tolerance = 1e-4, max_iterations = 10000) 
+    
+    beta_ests_data <- append(beta_ests_data, list(beta_ests))
+  }
+  
+  
+  beta_hat_sum <- numeric(p)
+
+  for (set in 1:sets) {
+    
+    beta_hat_sum <- beta_hat_sum + as.vector(beta_ests_data[[set]])
+    
+  }
+
+  beta_hat_est <- beta_hat_sum / sets
+  
+  
+  y_hat_data <- list()
+  
+  for (i in 1:sets) {
+    
+    temp_y_hat <- x_data[[i]] %*% beta_hat_est
+    
+    y_hat_data <- append(y_hat_data, list(temp_y_hat))
+  }
+
+  
+  mse <- c()
+  
+  for (i in 1:sets) {
+    
+    temp_mse <- sum((y_data[[i]] - y_hat_data[[i]])^2)
+    
+    mse <- c(mse, temp_mse)
+  }
+  
+  mean_mse <- mean(mse)
+  
+  mse_cv <- c(mse_cv,mean_mse)
+  
+}
+
+which.min(mse_cv)
+min(mse_cv)
+
+mse_cv_inspect <- as.data.frame(mse_cv)
+
+lam_result <- seq(from = 5*10^-2, to = 10^2, by = 5*10^-3)[which.min(mse_cv)]
+
+```
+
+
+```{r beta_hat averages}
+
+beta_hat_sum <- numeric(p)
+
+for (set in 1:sets) {
+  
+  beta_hat_sum <- beta_hat_sum + as.vector(beta_ests_data[[set]])
+  
+}
+
+beta_hat_est <- beta_hat_sum / sets
+
+round(beta_hat_est,2)
+
+```
+
+
+```{r}
+
+y_hats <- c()
+y_s <- c()
+
+for (set in 1:sets) {
+  
+  
+  y_hats <- rbind(y_hats,y_hat_data[[set]])
+  y_s <- rbind(y_s,y_data[[set]])
+  
+}
+
+y_comp <- data.frame(y_vals = y_s, y_estimates = y_hats, diffs = (y_s-y_hats))
+
+mean((y_comp$diffs))
+
+```
+
+```{r}
+
+y_hat_test <- test_x%*%beta_hat_est
+
+test_mse <- sum((test_y - y_hat_test)^2)
+
+y_test_comp <- data.frame(y_vals = test_y, y_estimates = y_hat_test, diffs = (test_y-y_hat_test))
+
+mean((y_comp$diffs))
+
+
+
+sum((y_hat_test - mean(test_y))^2)
+
+```
+
