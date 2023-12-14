@@ -1,0 +1,493 @@
+
+```{r pre}
+set.seed(823) # set a random seed for reproducibility
+library(mvtnorm) # to sample from the multivariate normal dist
+library(progress) # to show progress bars on cv loops
+
+```
+
+Define data creation function
+```{r data creation function}
+
+# write a function to create sample data as specificed
+create_data <- function(n,n_test,sets,betas,sigma,mu_x,cor_val=0.5) {
+  # number of predictors
+  p <- length(betas)
+  # covariance matrix with the specified correlation
+  cov_matrix <- matrix(NA, ncol = p, nrow = p)
+  for (i in 1:p) {
+    for (j in 1:p) {
+      cov_matrix[i, j] <-cor_val^abs(j - i)
+    }
+  }
+  # lists to store the data for each sample
+  y_data <- list()
+  x_data <- list()
+  y_val_data <- list()
+  x_val_data <- list()
+  # create the samples (usually 50) of training data x and y
+  for (i in 1:sets) {
+    # sample x from the multivariate normal with specified mu and cov matrix
+    temp_x <- rmvnorm(n, mean = rep(mu_x,p), sigma = cov_matrix)
+    
+    temp_y <- temp_x %*% betas + sigma*rnorm(n)
+    temp_y <- scale(temp_y, center = T, scale = T)
+
+    x_data <- append(x_data, list(temp_x))
+    y_data <- append(y_data, list(temp_y))
+  }
+  # create the samples (usually 50) of validation data x and y
+  for (i in 1:sets) {
+     # sample x from the multivariate normal with specified mu and cov matrix
+    temp_x <- rmvnorm(n, mean = rep(mu_x,p), sigma = cov_matrix)
+    
+    temp_y <- temp_x %*% betas + sigma*rnorm(n)
+    temp_y <- scale(temp_y, center = T, scale = T)
+  
+    x_val_data <- append(x_val_data, list(temp_x))
+    y_val_data <- append(y_val_data, list(temp_y))
+  }
+  # create test data for x and y
+  test_x <- rmvnorm(n_test, mean = rep(mu_x,p), sigma = cov_matrix)
+  test_y <- test_x %*% betas + sigma*rnorm(n_test)
+  test_y <- scale(test_y, center = T, scale = T)
+  # return the data sets as a named list
+  return(list(x_train = x_data, y_train=y_data, x_test=test_x, y_test=test_y,
+              x_val = x_val_data, y_val = y_val_data))
+}
+
+
+```
+
+Define the LASSO function 
+```{r lasso}
+
+# Function to estimate betas using coordinate descent lasso
+lasso_coord_desc <- function(X, y, lambda, tolerance = 1e-4, 
+                             max_iterations = 10000) {
+  # Initialize coefficients based on the data structure
+  n <- nrow(X)
+  p <- ncol(X)
+  beta <- rep(0, p)
+  r <- y - X %*% beta # compute the initial residual with all betas=zero)
+
+  # Begin iterative coordinate descent
+  for(iter in 1:max_iterations) {
+    beta_old <- beta # store beta from last iteration for convergence check
+    # Loop over each of the p predictors
+    for(j in 1:p) {
+      # Calculate partial residual excluding current (j-th) predictor
+      r_partial <- y - X[, -j] %*% beta[-j]
+      # Compute rho (correlation)
+      rho <- sum(X[,j] * r_partial)
+      # Update beta[j] using soft thresholding as specified
+      denominator <- sum(X[,j]^2)
+      # implementing the thresholding function as if/else statement
+      if(rho < -lambda) {
+        beta[j] <- (rho + lambda) / denominator
+      } else if(rho > lambda) {
+        beta[j] <- (rho - lambda) / denominator
+      } else {
+        beta[j] <- 0
+      }
+      # Update residual (for the next iteration) with computed beta
+      r <- y - X %*% beta
+    }
+    # Check for convergence using the specified tolerance
+    if(max(abs(beta - beta_old)) < tolerance) {
+      break
+    }
+  }# return the lasso estimated betas
+  return(beta)
+}
+
+```
+
+Define the elastic net function
+```{r elastic net}
+# Function to estimate betas using coordinate descent elastic net
+elastic_net <- function(X, y, lambda1, lambda2, tolerance = 1e-4, 
+                        max_iterations = 10000) {
+  # Initialize coefficients based on the data structure
+  n <- nrow(X)
+  p <- ncol(X)
+  beta <- rep(0, p)
+  r <- y - X %*% beta # compute the initial residual with all betas=zero)
+  
+  # Begin iterative coordinate descent
+  for(iter in 1:max_iterations) {
+    beta_old <- beta # store beta from last iteration for convergence check
+    # Loop over each of the p predictors
+    for(j in 1:p) {
+      # Calculate partial residual excluding current (j-th) predictor
+      r_partial <- y - X[, -j] %*% beta[-j]
+       # Compute rho (correlation)
+      rho <- sum(X[,j] * r_partial)
+      # Update beta[j] using soft thresholding as specified
+      # Note the difference in the denominator compared to lasso
+      denominator <- sum(X[,j]^2) + lambda2
+      if(rho < -lambda1) {
+        beta[j] <- (rho + lambda1) / denominator
+      } else if(rho > lambda1) {
+        beta[j] <- (rho - lambda1) / denominator
+      } else {
+        beta[j] <- 0
+      }
+      # Update residual (for the next iteration) with computed beta
+      r <- y - X %*% beta
+    }
+    # Check for convergence using the specified tolerance
+    if(max(abs(beta - beta_old)) < tolerance) {
+      break
+    }
+  }# return the elastic net estimated betas
+  return(beta)}
+
+```
+
+Cross validation function for LASSO
+```{r cross validation lasso function}
+# CV function to find optimal LASSO lambda value given a data set
+cross_validation_lasso <- function(x_train,y_train,x_val,y_val) {
+  # The number of data sets can be derived from the data list
+  sets <- length(y_train)
+  # Define the number of steps for the cross-validation
+  num_steps <- 50
+  # Define the maximum potential parameter value to check
+  max_param <- 50
+  # Initialize an empty vector to store the parameters to check
+  parameters <- numeric(num_steps)
+  # Generate parameters to check with increasing step sizes
+  for (i in 1:num_steps) {
+    parameters[i] <- max_param * (1 - exp(-i^3/num_steps^3))
+  }
+  parameters[1] <- 0 # The first parameter to check should be 0
+  # Assign the range of parameters to check as "lambda_values"
+  lambda_values <- parameters
+  # Initialize a vector to store the mean MSE for each value
+  mean_mse_vector <- c()
+  # Loop to iterate over the different lambda values
+  for (i in (1:length(lambda_values))) {
+      # The current lambda to check
+      lambda_cv <- lambda_values[i] 
+      # Vector the store MSEs for current lambda across sets
+      mse_cv <- c()
+      # Iterate over training sets and perform lasso given current lambda
+      for (set in 1:sets) {
+        beta_ests <- lasso_coord_desc(x_train[[set]], y_train[[set]], lambda_cv,
+                                 tolerance = 1e-4, max_iterations = 10000)
+        # The estimated beta for each set is evaluated on each validation set
+        mse_val_step <- c() #Store MSE given train beta for each validation set
+        for (val_set in 1:sets) {
+          # Compute and store MSE for each validation set
+          y_hat <- x_val[[val_set]] %*% beta_ests
+          temp_mse <- sum((y_val[[val_set]] - y_hat)^2) / nrow(x_val[[val_set]])
+          mse_val_step <- c(mse_val_step,temp_mse)
+        }#The MSE for given lambda in a SET is the mean across validation MSEs
+        mse_cv <- c(mse_cv, mean(mse_val_step)) #Store MSE for each set
+      }# The mean MSE for a given lambda is the mean MSE across each data set
+      mean_mse_vector <- c(mean_mse_vector,mean(mse_cv))
+  }# After iterating across all lambdas, find the minimal mse
+  min_mse <- min(mean_mse_vector)
+  # Find the index of the lambda that generated the minimal mse
+  min_index <- which.min(mean_mse_vector)
+  # Store this optimal lambda
+  optimal_lambda <- lambda_values[min_index]
+  # Return optimal lambda and the corresponding MSE as a named list 
+  return(list(optimal_lambda1 = optimal_lambda, min_mse = min_mse))
+}
+
+```
+
+Cross validation function for Elastic Net
+```{r cross validation elastic net function}
+# CV function to find optimal elastic net lambda1/lambda2 value given data set
+cross_validation_net <- function(x_train,y_train,x_val,y_val) {
+  # The number of data sets can be derived from the data list
+  sets <- length(y_train)
+  # Define the number of steps for the cross-validation
+  num_steps <- 50
+  # Define the maximum parameter value
+  max_param <- 50
+  # Initialize an empty vector to store the parameters to check
+  parameters <- numeric(num_steps)
+  # Generate parameters with increasing step sizes
+  for (i in 1:num_steps) {
+    parameters[i] <- max_param * (1 - exp(-i^3/num_steps^3))
+  }
+  parameters[1] <- 0  # The first parameter to check should be 0
+  # Assign the range of lambda values for lambda1 and lambda2
+  lambda1_values <- parameters
+  lambda2_values <- parameters
+  # Initialize an empty matrix to store the mean MSE for each combination
+  mean_mse_matrix <- matrix(NA, nrow = length(lambda1_values), 
+                            ncol = length(lambda2_values))
+  rownames(mean_mse_matrix) <- lambda1_values # Assign lambda vals as row names
+  colnames(mean_mse_matrix) <- lambda2_values# Assign lambda vals as col names
+  # Add progress bar to see loop progress as this is computationally expensive
+  pb <- progress_bar$new(total = length(lambda1_values), 
+                         format = "[:bar] :percent :elapsed")
+  # Nested loop to iterate over lambda1 and lambda2 values (all combinations)
+  for (i in (1:length(lambda1_values))) {
+    for (j in 1:length(lambda2_values)) {
+      # The current lambda combination to check
+      lambda1_cv <- lambda1_values[i]
+      lambda2_cv <- lambda2_values[j]
+      # Vector the store MSEs for current lambda combination across sets
+      mse_cv <- c()
+      # Iterate over training sets and perform elastic net given lambdas
+      for (set in 1:sets) {
+        beta_ests <- elastic_net(x_train[[set]], y_train[[set]], lambda1_cv, lambda2_cv, 
+                                   tolerance = 1e-4, max_iterations = 10000)
+        # The estimated beta for each set is evaluated on each validation set
+        mse_val_step <- c() #Store MSE given train beta for each validation set
+        for (val_set in 1:sets) {
+          # Compute and store MSE for each validation set
+          y_hat <- x_val[[val_set]] %*% beta_ests
+          temp_mse <- sum((y_val[[val_set]] - y_hat)^2) / nrow(x_val[[val_set]])
+          mse_val_step <- c(mse_val_step, temp_mse)
+        }#MSE for given lambdas in a SET is the mean across validation MSEs
+        mse_cv <- c(mse_cv, mean(mse_val_step))
+      }# The mean MSE for given lambdas is the mean MSE across each data set
+      mean_mse_matrix[i, j] <- mean(mse_cv) #assign mean mse to matrix 
+    } 
+    pb$tick() # update the progress bar
+  } 
+  pb$terminate() # terminate progress bar after the loop
+  # Find the combination of lambda1 and lambda2 with the minimum mean MSE
+  min_mse <- which(mean_mse_matrix == min(mean_mse_matrix), arr.ind = TRUE)
+  optimal_lambda1 <- lambda1_values[min_mse[1]] # store optimal lambda1
+  optimal_lambda2 <- lambda2_values[min_mse[2]] # store optimal lambda2
+  # Return optimal lambdas and corresponding minimal MSE as a named list
+  return(list(optimal_lambda1 = optimal_lambda1, 
+              optimal_lambda2 = optimal_lambda2,
+              min_mse = min_mse)) }
+
+```
+
+
+Compute results for the LASSO (Test MSE, beta estimates, ...)
+```{r results lasso}
+# Given data and using the functions above, compute model results for LASSO
+compute_results_lasso <- function(x_train,y_train,x_test,y_test,x_val,y_val) {
+  # Number of predictors can be derived from the data set dimensions 
+  p <- length(x_train[[1]][1,])
+  # Use the lasso CV function to find optimal lambda given the data
+  cv_results = cross_validation_lasso(x_train,y_train,x_val,y_val)
+  lam = cv_results$optimal_lambda # Store optimal lambda
+  # Lists to store model coefficient estimates and y estimates
+  beta_ests_data <- list()
+  y_hat_data <- list()
+  # Derive the number of data sets from the data structure
+  sets <- length(y_train)
+  # For each set, perform LASSO using optimal lambda
+  for (set in 1:sets) {
+  beta_ests <- lasso_coord_desc(x_train[[set]], y_train[[set]], lam, 
+                           tolerance = 1e-4, max_iterations = 1000) 
+  # Store computed beta estimates for the set
+  beta_ests_data <- append(beta_ests_data, list(beta_ests)) 
+  # Compute y estimates given estimated betas 
+  temp_y_hat <- x_train[[set]] %*% beta_ests_data[[set]]
+  # Store the estimated y values for the set
+  y_hat_data <- append(y_hat_data, list(temp_y_hat))
+  }
+  # For each set of beta estimates, compute the MSE on each validation set
+  val_beta_mses <- c() # Vector to store mean of validation MSEs
+  # Iterate over the sets of beta estimates computed above
+  for (beta_set in 1:sets) {
+    val_set_mses <- c() # To store MSE per validation set for given beta
+    # Iterate over each validation set an compute MSE given the beta
+    for (val_set in 1:sets) {
+      y_hat_val <- x_val[[val_set]]%*%beta_ests_data[[beta_set]]
+      val_beta_mse <- mean((y_val[[val_set]] - y_hat_val)^2)
+      val_set_mses <- c(val_set_mses,val_beta_mse)
+    }# For each set of train betas, append the mean of the validaton MSEs
+    val_beta_mses <- c(val_beta_mses,mean(val_set_mses))
+  }# Find the set of betas with to lowest MSE and store it
+  best_beta_est <- beta_ests_data[[which.min(val_beta_mses)]]
+  # 1.) Across all data sets we want to count how often a coefficient beta_i 
+  # is set to zero (zero_count) to evaluate variable selection 
+  # 2.) We want to compute the mean estimated train beta across all data sets
+  zero_count <- numeric(p) # 1.) vector to store the counts
+  beta_hat_sum <- numeric(p) # 2.) vector to store sum of betas (across sets)
+  # Iterate again over all data sets
+  for (set in 1:sets) {
+    # 1.) Check which beta coefficients are zero and increase counts
+    zero_count <- zero_count + (beta_ests_data[[set]] == 0)
+    # 2.) Sum up all beta estimates across sets
+    beta_hat_sum <- beta_hat_sum + as.vector(beta_ests_data[[set]])
+  }
+  # Compute an average estimated beta by dividing the sum by number of sets
+  beta_hat_est <- beta_hat_sum / sets
+  # Compute y estimates based on this average beta
+  y_hat_test <- x_test%*%beta_hat_est
+  # Compute MSE based on the average beta
+  test_mse <- mean((y_test - y_hat_test)^2)
+  # Compute y estimates based on the best beta given the validation above
+  y_hat_test_best_beta <- x_test%*%best_beta_est
+  # Compute MSE based on the best beta given the validation above
+  test_mse_best_beta <- mean((y_test - y_hat_test_best_beta)^2)
+  # Return both beta estimates, corresponding MSEs and counts as named list
+  return(list(beta_hat = beta_hat_est, test_mse = test_mse, y_hat = y_hat_test,
+              lambda = lam, beta_counts = zero_count,
+              best_beta = best_beta_est, 
+              test_mse_best_beta = test_mse_best_beta))}
+
+```
+
+
+Compute results for the Elastic Net (Test MSE, beta estimates, ...)
+```{r results elastic net}
+# Given data and using the functions above, compute results for Elastic Net
+compute_results_net <- function(x_train,y_train,x_test,y_test,x_val,y_val) {
+  # Number of predictors can be derived from the data set dimensions 
+  p <- length(x_train[[1]][1,])
+  # Use the elastic net CV function to find optimal lambda given the data
+  cv_results = cross_validation_net(x_train,y_train,x_val,y_val)
+  lam1 = cv_results$optimal_lambda1 # store optimal lambda1
+  lam2 = cv_results$optimal_lambda2 # store optimal lambda2
+  # Lists to store model coefficient estimates and y estimates
+  beta_ests_data <- list()
+  y_hat_data <- list()
+  # Derive the number of data sets from the data structure
+  sets <- length(y_train)
+  # For each set, perform Elastic Net using optimal lambda
+  for (set in 1:sets) {
+  beta_ests <- elastic_net(x_train[[set]], y_train[[set]], lam1, lam2, 
+                           tolerance = 1e-4, max_iterations = 1000) 
+  # Store computed beta estimates for the set
+  beta_ests_data <- append(beta_ests_data, list(beta_ests)) 
+  # Compute y estimates given estimated betas 
+  temp_y_hat <- x_train[[set]] %*% beta_ests_data[[set]]
+  # Store the estimated y values for the set
+  y_hat_data <- append(y_hat_data, list(temp_y_hat))
+  }
+  # For each set of beta estimates, compute the MSE on each validation set
+  val_beta_mses <- c() # Vector to store mean of validation MSEs
+  # Iterate over the sets of beta estimates computed above
+  for (beta_set in 1:sets) {
+    val_set_mses <- c() # To store MSE per validation set for given beta
+    # Iterate over each validation set an compute MSE given the beta
+    for (val_set in 1:sets) {
+      y_hat_val <- x_val[[val_set]]%*%beta_ests_data[[beta_set]]
+      val_beta_mse <- mean((y_val[[val_set]] - y_hat_val)^2)
+      val_set_mses <- c(val_set_mses,val_beta_mse)
+    }# For each set of train betas, append the mean of the validaton MSEs
+    val_beta_mses <- c(val_beta_mses,mean(val_set_mses))
+  }# Find the set of betas with to lowest MSE and store it
+  best_beta_est <- beta_ests_data[[which.min(val_beta_mses)]]
+  # 1.) Across all data sets we want to count how often a coefficient beta_i 
+  # is set to zero (zero_count) to evaluate variable selection 
+  # 2.) We want to compute the mean estimated train beta across all data sets
+  zero_count <- numeric(p) # 1.) vector to store the counts
+  beta_hat_sum <- numeric(p) # 2.) vector to store sum of betas (across sets)
+  # Iterate again over all data sets
+  for (set in 1:sets) {
+    # 1.) Check which beta coefficients are zero and increase counts
+    zero_count <- zero_count + (beta_ests_data[[set]] == 0)
+    # 2.) Sum up all beta estimates across sets
+    beta_hat_sum <- beta_hat_sum + as.vector(beta_ests_data[[set]])
+  }
+  # Compute an average estimated beta by dividing the sum by number of sets
+  beta_hat_est <- beta_hat_sum / sets
+  # Compute y estimates based on this average beta
+  y_hat_test <- x_test%*%beta_hat_est
+  # Compute MSE based on the average beta
+  test_mse <- mean((y_test - y_hat_test)^2)
+  # Compute y estimates based on the best beta given the validation above
+  y_hat_test_best_beta <- x_test%*%best_beta_est
+  # Compute MSE based on the best beta given the validation above
+  test_mse_best_beta <- mean((y_test - y_hat_test_best_beta)^2)
+  # Return both beta estimates, corresponding MSEs and counts as named list
+  return(list(beta_hat = beta_hat_est, test_mse = test_mse, y_hat = y_hat_test,
+              lambda1 = lam1, lambda2 = lam2,
+              beta_counts = zero_count,
+              best_beta = best_beta_est, 
+              test_mse_best_beta = test_mse_best_beta)) }
+
+
+```
+
+Run the model
+```{r compute results using the functions}
+
+# Function to create data and run/evaluate model given some parameters
+run_model <- function(n,n_test,sets,betas,sigma,mu_x,n_loops,cor_val=0.5) {
+  # Vectors to store model results for each run of the model (n_loops)
+  elastic_lam1 <- c()
+  elastic_lam2 <- c()
+  elastic_test_mse_avg_beta <- c()
+  elastic_beta_hats <- c()
+  elastic_beta_counts <- c()
+  elastic_best_betas <- c()
+  elastic_test_mse_best_beta <- c()
+  
+  lasso_lam <- c()
+  lasso_test_mse_avg_beta  <- c()
+  lasso_beta_hats <- c()
+  lasso_beta_counts <- c()
+  lasso_best_betas <- c()
+  lasso_test_mse_best_beta <- c()
+  # Repeat the whole process n_loops times (and store results each time)
+  for (i in 1:n_loops) {
+    # Create the data given the parameters
+    data = create_data(n,n_test,sets,betas,sigma,mu_x,cor_val)
+    # Compute the model results for the specified data with elastic net
+    results_net = compute_results_net(data$x_train,data$y_train,
+                          data$x_test,data$y_test,
+                          data$x_val,data$y_val) 
+    # Store relevant model output
+    elastic_lam1 <- c(elastic_lam1,results_net$lambda1)
+    elastic_lam2 <- c(elastic_lam2,results_net$lambda2)
+    elastic_test_mse_avg_beta <- c(elastic_test_mse_avg_beta,results_net$test_mse)
+    elastic_beta_hats <- c(elastic_beta_hats,results_net$beta_hat)
+    elastic_beta_counts <- c(elastic_beta_counts,results_net$beta_counts)
+    elastic_best_betas <- c(elastic_best_betas,results_net$best_beta)
+    elastic_test_mse_best_beta <- c(elastic_test_mse_best_beta,results_net$test_mse_best_beta)
+    # Compute the model results for the specified data with lasso
+    results_lasso = compute_results_lasso(data$x_train,data$y_train,
+                          data$x_test,data$y_test,
+                          data$x_val,data$y_val) 
+    # Store relevant model output
+    lasso_lam <- c(lasso_lam,results_lasso$lambda)
+    lasso_test_mse_avg_beta <- c(lasso_test_mse_avg_beta,results_lasso$test_mse)
+    lasso_beta_hats <- c(lasso_beta_hats,results_lasso$beta_hat)
+    lasso_beta_counts <- c(lasso_beta_counts,results_lasso$beta_counts)
+    lasso_best_betas <- c(lasso_best_betas,results_lasso$best_beta)
+    lasso_test_mse_best_beta <- c(lasso_test_mse_best_beta,results_lasso$test_mse_best_beta)
+  }
+  # Return the model outputs as a named list for easy accessibilty
+  return(list(elastic_lam1=elastic_lam1,elastic_lam2=elastic_lam2,
+              elastic_test_mse_avg_beta=elastic_test_mse_avg_beta,
+              elastic_beta_hats=elastic_beta_hats,
+              elastic_beta_counts=elastic_beta_counts,
+              elastic_best_betas=elastic_best_betas,
+              elastic_test_mse_best_beta=elastic_test_mse_best_beta,
+              lasso_lam=lasso_lam,
+              lasso_test_mse_avg_beta=lasso_test_mse_avg_beta,
+              lasso_beta_hats=lasso_beta_hats,
+              lasso_beta_counts=lasso_beta_counts,
+              lasso_best_betas=lasso_best_betas,
+              lasso_test_mse_best_beta=lasso_test_mse_best_beta))
+}
+
+# Run the model on standard parameters
+n <- 20
+n_test <- 200
+sets <- 50
+betas <- rep(c(3,1.5,0,0,2,0,0,0),1)
+sigma <- 3
+mu_x <- 0
+n_loops <- 1
+
+model_output <- run_model(n,n_test,sets,betas,sigma,mu_x,n_loops)
+
+```
+
+
+
+
+
+
+
+
