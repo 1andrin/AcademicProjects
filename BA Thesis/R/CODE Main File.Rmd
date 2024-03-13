@@ -1,6 +1,5 @@
 ---
 title: "CODE - M&A Activity and Competition Policy: Anaylsis and Implications for Sales Growth"
-author: "Andrin Gehrig"
 date: "7/18/2022"
 output: html_document
 editor_options: 
