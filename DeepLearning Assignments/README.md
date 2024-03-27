@@ -1,1 +1,3 @@
-Assignment one is about classifying mel spectograms into four music genres.
+Assignment 1 is about classifying mel spectograms into four music genres. It includes implementing a specific CNN architecture, evaluating its performance through metrics like accuracy and confusion matrices, and analyzing predictions using visual and Grad-CAM methods. Additionally, it requires designing a two-stream CNN architecture that distinctively processes time and frequency components of spectrograms.
+
+Assignment 2 investigates the design of neural networks to approximate specific mathematical functions. parts 1 and 2 implement some simple practical examples. Part 3 looks at the theoretical design of mostly ReLU-based multilayer and convolutional networks to achieve identity and constant mappings. The task emphasizes parameters adjustment to navigate ReLU's non-linearity.
