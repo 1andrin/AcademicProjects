@@ -1,2 +1,2 @@
 # AcademicProjects
-code an results from projects related to course work or academic societies
+Code and results/reports related to course work projects and papers
